@@ -1,49 +1,57 @@
 import os
 import torch
-from transformers import MaskFormerFeatureExtractor, MaskFormerForInstanceSegmentation
+import torch_directml  # Import the DirectML library
+from torchvision import models, transforms
 from PIL import Image
-import requests
+import numpy as np
+import matplotlib.pyplot as plt  # For visualizing the segmentation map
 
-# Load the pre-trained model and feature extractor
-model_name = "facebook/maskformer-swin-base-coco"
-feature_extractor = MaskFormerFeatureExtractor.from_pretrained(model_name)
-model = MaskFormerForInstanceSegmentation.from_pretrained(model_name)
+# Load the pre-trained DeepLabV3 model
+model = models.segmentation.deeplabv3_resnet101(pretrained=True)
+
+# Set up DirectML device
+device = torch_directml.device()  # Use DirectML device instead of CUDA
+model.to(device)  # Move the model to the DirectML device
+model.eval()  # Set the model to evaluation mode
+
+# Define the image preprocessing pipeline
+preprocess = transforms.Compose([
+    transforms.Resize((520, 520)),  # Resize to the input size expected by DeepLabV3
+    transforms.ToTensor(),  # Convert the image to a tensor
+    transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),  # Normalize
+])
 
 def segment_image(image_path):
     # Load the image
-    image = Image.open(image_path)
+    image = Image.open(image_path).convert("RGB")
     
     # Preprocess the image
-    inputs = feature_extractor(images=image, return_tensors="pt")
+    input_tensor = preprocess(image).unsqueeze(0).to(device)  # Add batch dimension and move to device
     
     # Perform inference
     with torch.no_grad():
-        outputs = model(**inputs)
+        output = model(input_tensor)["out"][0]  # Get the output segmentation map
     
-    # Post-process the output
-    result = feature_extractor.post_process_panoptic_segmentation(outputs, target_sizes=[image.size[::-1]])[0]
+    # Convert the output to a segmentation map
+    output_predictions = output.argmax(0).cpu().numpy()  # Move to CPU and convert to numpy array
     
-    # Extract the segmentation map and labels
-    segmentation = result["segmentation"]
-    segments_info = result["segments_info"]
-    
-    # Print the detected objects
-    for segment in segments_info:
-        label_id = segment["label_id"]
-        label = model.config.id2label[label_id]
-        print(f"Detected {label} with segment ID {segment['id']}")
-    
-    return segmentation, segments_info
+    return output_predictions
 
 if __name__ == "__main__":
     # Input image path
     image_path = input("Enter the path to the image: ")
     
     # Segment the image
-    segmentation, segments_info = segment_image(image_path)
+    segmentation_map = segment_image(image_path)
     
-    # Optionally, save the segmentation map
-    segmentation_image = Image.fromarray(segmentation.numpy())
+    # Visualize the segmentation map
+    plt.imshow(segmentation_map, cmap="nipy_spectral")  # Use a colormap to visualize classes
+    plt.colorbar()
+    plt.title("Segmentation Map")
+    plt.show()
+    
+    # Optionally, save the segmentation map as an image
+    segmentation_image = Image.fromarray((segmentation_map * 255 / segmentation_map.max()).astype(np.uint8))  # Scale to 0-255
     
     # Ensure the output directory exists
     output_dir = "image_out"
